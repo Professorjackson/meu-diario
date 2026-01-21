@@ -1,0 +1,684 @@
+// ============================================
+// CONFIGURAÇÃO DO FIREBASE
+// ============================================
+// IMPORTANTE: Substitua com suas próprias credenciais do Firebase
+// Para obter: https://console.firebase.google.com/
+const firebaseConfig = {
+    apiKey: "AIzaSyBtdJJDbMahT7aUPlMBdxrxDFTUom_Aywg",
+    authDomain: "meu-diario-fisica-bfba1.firebaseapp.com",
+    projectId: "meu-diario-fisica-bfba1",
+    storageBucket: "meu-diario-fisica-bfba1.firebasestorage.app",
+    messagingSenderId: "415781697938",
+    appId: "1:415781697938:web:c0a67af9d13eebe936a94b"
+};
+
+// Inicializar Firebase
+let app, auth, db;
+try {
+    app = firebase.initializeApp(firebaseConfig);
+    auth = firebase.auth();
+    db = firebase.firestore();
+} catch (error) {
+    console.error("Erro ao inicializar Firebase:", error);
+    alert("Configure o Firebase primeiro! Veja as instruções no README.md");
+}
+
+// ============================================
+// ESTADO DA APLICAÇÃO
+// ============================================
+let currentUser = null;
+let currentEditingId = null;
+let currentEditingType = null;
+
+// ============================================
+// AUTENTICAÇÃO
+// ============================================
+const authScreen = document.getElementById('auth-screen');
+const appScreen = document.getElementById('app-screen');
+const authForm = document.getElementById('auth-form');
+const authTitle = document.getElementById('auth-title');
+const authSubmit = document.getElementById('auth-submit');
+const authSwitchText = document.getElementById('auth-switch-text');
+const authSwitchLink = document.getElementById('auth-switch-link');
+const authMessage = document.getElementById('auth-message');
+const nameGroup = document.getElementById('name-group');
+
+let isLoginMode = true;
+
+// Alternar entre login e registro
+authSwitchLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    isLoginMode = !isLoginMode;
+    
+    if (isLoginMode) {
+        authTitle.textContent = 'Login';
+        authSubmit.textContent = 'Entrar';
+        authSwitchText.textContent = 'Não tem uma conta?';
+        authSwitchLink.textContent = 'Cadastre-se';
+        nameGroup.style.display = 'none';
+    } else {
+        authTitle.textContent = 'Cadastro';
+        authSubmit.textContent = 'Cadastrar';
+        authSwitchText.textContent = 'Já tem uma conta?';
+        authSwitchLink.textContent = 'Faça login';
+        nameGroup.style.display = 'block';
+    }
+    
+    authMessage.classList.remove('show');
+});
+
+// Submeter formulário de autenticação
+authForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+    const name = document.getElementById('name').value;
+    
+    try {
+        if (isLoginMode) {
+            // Login
+            const userCredential = await auth.signInWithEmailAndPassword(email, password);
+            showMessage('Login realizado com sucesso!', 'success');
+        } else {
+            // Registro
+            const userCredential = await auth.createUserWithEmailAndPassword(email, password);
+            await userCredential.user.updateProfile({ displayName: name });
+            
+            // Salvar dados do usuário
+            await db.collection('users').doc(userCredential.user.uid).set({
+                name: name,
+                email: email,
+                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            });
+            
+            showMessage('Conta criada com sucesso!', 'success');
+        }
+    } catch (error) {
+        console.error('Erro de autenticação:', error);
+        showMessage(getErrorMessage(error.code), 'error');
+    }
+});
+
+// Monitorar estado de autenticação
+auth.onAuthStateChanged((user) => {
+    if (user) {
+        currentUser = user;
+        showApp();
+    } else {
+        currentUser = null;
+        showAuth();
+    }
+});
+
+// Logout
+document.getElementById('logout-btn').addEventListener('click', () => {
+    auth.signOut();
+});
+
+function showAuth() {
+    authScreen.classList.add('active');
+    appScreen.classList.remove('active');
+}
+
+function showApp() {
+    authScreen.classList.remove('active');
+    appScreen.classList.add('active');
+    
+    const userName = currentUser.displayName || currentUser.email;
+    document.getElementById('user-name').textContent = userName;
+    document.getElementById('dashboard-user-name').textContent = userName;
+    
+    loadDashboardStats();
+    loadQuestions();
+    loadLessonPlans();
+    loadClasses();
+}
+
+function showMessage(message, type) {
+    authMessage.textContent = message;
+    authMessage.className = `message ${type} show`;
+}
+
+function getErrorMessage(code) {
+    const messages = {
+        'auth/email-already-in-use': 'Este email já está cadastrado.',
+        'auth/invalid-email': 'Email inválido.',
+        'auth/weak-password': 'A senha deve ter pelo menos 6 caracteres.',
+        'auth/user-not-found': 'Usuário não encontrado.',
+        'auth/wrong-password': 'Senha incorreta.'
+    };
+    return messages[code] || 'Erro ao processar solicitação.';
+}
+
+// ============================================
+// NAVEGAÇÃO
+// ============================================
+const navLinks = document.querySelectorAll('.nav-link');
+const pages = document.querySelectorAll('.page');
+const dashboardCards = document.querySelectorAll('.dashboard-card[data-page]');
+
+function showPage(pageName) {
+    pages.forEach(page => page.classList.remove('active'));
+    navLinks.forEach(link => link.classList.remove('active'));
+    
+    document.getElementById(`${pageName}-page`).classList.add('active');
+    document.querySelector(`[data-page="${pageName}"]`)?.classList.add('active');
+}
+
+navLinks.forEach(link => {
+    link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const page = link.dataset.page;
+        showPage(page);
+    });
+});
+
+dashboardCards.forEach(card => {
+    card.addEventListener('click', () => {
+        const page = card.dataset.page;
+        showPage(page);
+    });
+});
+
+// ============================================
+// DASHBOARD
+// ============================================
+async function loadDashboardStats() {
+    try {
+        const questionsSnapshot = await db.collection('questions')
+            .where('userId', '==', currentUser.uid).get();
+        document.getElementById('questions-count').textContent = 
+            `${questionsSnapshot.size} questões`;
+        
+        const plansSnapshot = await db.collection('lessonPlans')
+            .where('userId', '==', currentUser.uid).get();
+        document.getElementById('plans-count').textContent = 
+            `${plansSnapshot.size} planos`;
+        
+        const classesSnapshot = await db.collection('classes')
+            .where('userId', '==', currentUser.uid).get();
+        document.getElementById('classes-count').textContent = 
+            `${classesSnapshot.size} turmas`;
+    } catch (error) {
+        console.error('Erro ao carregar estatísticas:', error);
+    }
+}
+
+// ============================================
+// QUESTÕES
+// ============================================
+const questionsList = document.getElementById('questions-list');
+const questionModal = document.getElementById('question-modal');
+const questionForm = document.getElementById('question-form');
+const newQuestionBtn = document.getElementById('new-question-btn');
+const cancelQuestionBtn = document.getElementById('cancel-question-btn');
+const filterTopic = document.getElementById('filter-topic');
+const filterDifficulty = document.getElementById('filter-difficulty');
+
+// Criar alternativas
+const alternativesContainer = document.getElementById('alternatives-container');
+const letters = ['A', 'B', 'C', 'D', 'E'];
+
+function createAlternativesInputs() {
+    alternativesContainer.innerHTML = '';
+    letters.forEach(letter => {
+        const div = document.createElement('div');
+        div.className = 'alternative-input';
+        div.innerHTML = `
+            <span class="alt-letter">${letter})</span>
+            <input type="text" class="alt-text" data-letter="${letter}" placeholder="Alternativa ${letter}">
+            <label class="checkbox-label">
+                <input type="radio" name="correct" value="${letter}">
+                Correta
+            </label>
+        `;
+        alternativesContainer.appendChild(div);
+    });
+}
+
+createAlternativesInputs();
+
+newQuestionBtn.addEventListener('click', () => {
+    currentEditingId = null;
+    currentEditingType = 'question';
+    document.getElementById('question-modal-title').textContent = 'Nova Questão';
+    questionForm.reset();
+    createAlternativesInputs();
+    questionModal.classList.add('active');
+});
+
+cancelQuestionBtn.addEventListener('click', () => {
+    questionModal.classList.remove('active');
+});
+
+questionForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const statement = document.getElementById('q-statement').value;
+    const topic = document.getElementById('q-topic').value;
+    const difficulty = document.getElementById('q-difficulty').value;
+    
+    const alternatives = [];
+    const correctAnswer = document.querySelector('input[name="correct"]:checked')?.value;
+    
+    if (!correctAnswer) {
+        alert('Marque a alternativa correta!');
+        return;
+    }
+    
+    letters.forEach(letter => {
+        const text = document.querySelector(`.alt-text[data-letter="${letter}"]`).value;
+        if (text.trim()) {
+            alternatives.push({
+                letter,
+                text,
+                isCorrect: letter === correctAnswer
+            });
+        }
+    });
+    
+    const questionData = {
+        statement,
+        topic,
+        difficulty,
+        alternatives,
+        userId: currentUser.uid,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    
+    try {
+        if (currentEditingId) {
+            await db.collection('questions').doc(currentEditingId).update(questionData);
+        } else {
+            questionData.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+            await db.collection('questions').add(questionData);
+        }
+        
+        questionModal.classList.remove('active');
+        loadQuestions();
+        loadDashboardStats();
+    } catch (error) {
+        console.error('Erro ao salvar questão:', error);
+        alert('Erro ao salvar questão!');
+    }
+});
+
+async function loadQuestions() {
+    try {
+        let query = db.collection('questions')
+            .where('userId', '==', currentUser.uid);
+        
+        const topic = filterTopic.value;
+        const difficulty = filterDifficulty.value;
+        
+        if (topic) query = query.where('topic', '==', topic);
+        if (difficulty) query = query.where('difficulty', '==', difficulty);
+        
+        const snapshot = await query.get();
+        
+        if (snapshot.empty) {
+            questionsList.innerHTML = '<p class="empty-message">Nenhuma questão encontrada.</p>';
+            return;
+        }
+        
+        questionsList.innerHTML = '';
+        snapshot.forEach(doc => {
+            const question = doc.data();
+            const card = createQuestionCard(doc.id, question);
+            questionsList.appendChild(card);
+        });
+    } catch (error) {
+        console.error('Erro ao carregar questões:', error);
+    }
+}
+
+function createQuestionCard(id, question) {
+    const div = document.createElement('div');
+    div.className = 'question-card';
+    
+    const alternativesHTML = question.alternatives.map(alt => `
+        <div class="alternative ${alt.isCorrect ? 'correct' : ''}">
+            ${alt.letter}) ${alt.text}
+        </div>
+    `).join('');
+    
+    div.innerHTML = `
+        <div class="question-header">
+            <span class="topic-badge">${question.topic}</span>
+            <span class="difficulty-badge ${question.difficulty}">${question.difficulty}</span>
+        </div>
+        <p class="question-statement">${question.statement}</p>
+        <div class="alternatives">${alternativesHTML}</div>
+        <div class="question-actions">
+            <button class="btn-secondary" onclick="editQuestion('${id}')">Editar</button>
+            <button class="btn-danger" onclick="deleteQuestion('${id}')">Deletar</button>
+        </div>
+    `;
+    
+    return div;
+}
+
+async function editQuestion(id) {
+    try {
+        const doc = await db.collection('questions').doc(id).get();
+        const question = doc.data();
+        
+        currentEditingId = id;
+        document.getElementById('question-modal-title').textContent = 'Editar Questão';
+        
+        document.getElementById('q-statement').value = question.statement;
+        document.getElementById('q-topic').value = question.topic;
+        document.getElementById('q-difficulty').value = question.difficulty;
+        
+        question.alternatives.forEach(alt => {
+            const input = document.querySelector(`.alt-text[data-letter="${alt.letter}"]`);
+            if (input) input.value = alt.text;
+            if (alt.isCorrect) {
+                document.querySelector(`input[name="correct"][value="${alt.letter}"]`).checked = true;
+            }
+        });
+        
+        questionModal.classList.add('active');
+    } catch (error) {
+        console.error('Erro ao carregar questão:', error);
+    }
+}
+
+async function deleteQuestion(id) {
+    if (!confirm('Tem certeza que deseja deletar esta questão?')) return;
+    
+    try {
+        await db.collection('questions').doc(id).delete();
+        loadQuestions();
+        loadDashboardStats();
+    } catch (error) {
+        console.error('Erro ao deletar questão:', error);
+        alert('Erro ao deletar questão!');
+    }
+}
+
+filterTopic.addEventListener('change', loadQuestions);
+filterDifficulty.addEventListener('change', loadQuestions);
+
+// ============================================
+// PLANOS DE AULA
+// ============================================
+const lessonPlansList = document.getElementById('lesson-plans-list');
+const planModal = document.getElementById('plan-modal');
+const planForm = document.getElementById('plan-form');
+const newPlanBtn = document.getElementById('new-plan-btn');
+const cancelPlanBtn = document.getElementById('cancel-plan-btn');
+
+newPlanBtn.addEventListener('click', () => {
+    currentEditingId = null;
+    document.getElementById('plan-modal-title').textContent = 'Novo Plano de Aula';
+    planForm.reset();
+    planModal.classList.add('active');
+});
+
+cancelPlanBtn.addEventListener('click', () => {
+    planModal.classList.remove('active');
+});
+
+planForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const planData = {
+        title: document.getElementById('p-title').value,
+        date: document.getElementById('p-date').value,
+        duration: document.getElementById('p-duration').value,
+        objectives: document.getElementById('p-objectives').value,
+        content: document.getElementById('p-content').value,
+        methodology: document.getElementById('p-methodology').value,
+        resources: document.getElementById('p-resources').value,
+        userId: currentUser.uid,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    
+    try {
+        if (currentEditingId) {
+            await db.collection('lessonPlans').doc(currentEditingId).update(planData);
+        } else {
+            planData.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+            await db.collection('lessonPlans').add(planData);
+        }
+        
+        planModal.classList.remove('active');
+        loadLessonPlans();
+        loadDashboardStats();
+    } catch (error) {
+        console.error('Erro ao salvar plano:', error);
+        alert('Erro ao salvar plano de aula!');
+    }
+});
+
+async function loadLessonPlans() {
+    try {
+        const snapshot = await db.collection('lessonPlans')
+            .where('userId', '==', currentUser.uid)
+            .orderBy('date', 'desc')
+            .get();
+        
+        if (snapshot.empty) {
+            lessonPlansList.innerHTML = '<p class="empty-message">Nenhum plano cadastrado.</p>';
+            return;
+        }
+        
+        lessonPlansList.innerHTML = '';
+        snapshot.forEach(doc => {
+            const plan = doc.data();
+            const card = createPlanCard(doc.id, plan);
+            lessonPlansList.appendChild(card);
+        });
+    } catch (error) {
+        console.error('Erro ao carregar planos:', error);
+    }
+}
+
+function createPlanCard(id, plan) {
+    const div = document.createElement('div');
+    div.className = 'lesson-plan-card';
+    
+    const dateStr = plan.date ? new Date(plan.date).toLocaleDateString('pt-BR') : '';
+    
+    div.innerHTML = `
+        <div class="plan-header">
+            <h3>${plan.title}</h3>
+            ${dateStr ? `<span class="plan-date">${dateStr}</span>` : ''}
+        </div>
+        <div class="plan-content">
+            <div class="plan-section">
+                <strong>Objetivos:</strong>
+                <p>${plan.objectives}</p>
+            </div>
+            ${plan.content ? `
+                <div class="plan-section">
+                    <strong>Conteúdo:</strong>
+                    <p>${plan.content}</p>
+                </div>
+            ` : ''}
+            ${plan.methodology ? `
+                <div class="plan-section">
+                    <strong>Metodologia:</strong>
+                    <p>${plan.methodology}</p>
+                </div>
+            ` : ''}
+            ${plan.resources ? `
+                <div class="plan-section">
+                    <strong>Recursos:</strong>
+                    <p>${plan.resources}</p>
+                </div>
+            ` : ''}
+            ${plan.duration ? `<div class="plan-meta">Duração: ${plan.duration} minutos</div>` : ''}
+        </div>
+        <div class="plan-actions">
+            <button class="btn-secondary" onclick="editPlan('${id}')">Editar</button>
+            <button class="btn-danger" onclick="deletePlan('${id}')">Deletar</button>
+        </div>
+    `;
+    
+    return div;
+}
+
+async function editPlan(id) {
+    try {
+        const doc = await db.collection('lessonPlans').doc(id).get();
+        const plan = doc.data();
+        
+        currentEditingId = id;
+        document.getElementById('plan-modal-title').textContent = 'Editar Plano de Aula';
+        
+        document.getElementById('p-title').value = plan.title;
+        document.getElementById('p-date').value = plan.date || '';
+        document.getElementById('p-duration').value = plan.duration || '';
+        document.getElementById('p-objectives').value = plan.objectives;
+        document.getElementById('p-content').value = plan.content || '';
+        document.getElementById('p-methodology').value = plan.methodology || '';
+        document.getElementById('p-resources').value = plan.resources || '';
+        
+        planModal.classList.add('active');
+    } catch (error) {
+        console.error('Erro ao carregar plano:', error);
+    }
+}
+
+async function deletePlan(id) {
+    if (!confirm('Tem certeza que deseja deletar este plano?')) return;
+    
+    try {
+        await db.collection('lessonPlans').doc(id).delete();
+        loadLessonPlans();
+        loadDashboardStats();
+    } catch (error) {
+        console.error('Erro ao deletar plano:', error);
+        alert('Erro ao deletar plano!');
+    }
+}
+
+// ============================================
+// TURMAS
+// ============================================
+const classesList = document.getElementById('classes-list');
+const classModal = document.getElementById('class-modal');
+const classForm = document.getElementById('class-form');
+const newClassBtn = document.getElementById('new-class-btn');
+const cancelClassBtn = document.getElementById('cancel-class-btn');
+
+newClassBtn.addEventListener('click', () => {
+    currentEditingId = null;
+    document.getElementById('class-modal-title').textContent = 'Nova Turma';
+    classForm.reset();
+    classModal.classList.add('active');
+});
+
+cancelClassBtn.addEventListener('click', () => {
+    classModal.classList.remove('active');
+});
+
+classForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const classData = {
+        name: document.getElementById('c-name').value,
+        year: parseInt(document.getElementById('c-year').value),
+        userId: currentUser.uid,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    
+    try {
+        if (currentEditingId) {
+            await db.collection('classes').doc(currentEditingId).update(classData);
+        } else {
+            classData.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+            await db.collection('classes').add(classData);
+        }
+        
+        classModal.classList.remove('active');
+        loadClasses();
+        loadDashboardStats();
+    } catch (error) {
+        console.error('Erro ao salvar turma:', error);
+        alert('Erro ao salvar turma!');
+    }
+});
+
+async function loadClasses() {
+    try {
+        const snapshot = await db.collection('classes')
+            .where('userId', '==', currentUser.uid)
+            .orderBy('year', 'desc')
+            .get();
+        
+        if (snapshot.empty) {
+            classesList.innerHTML = '<p class="empty-message">Nenhuma turma cadastrada.</p>';
+            return;
+        }
+        
+        classesList.innerHTML = '';
+        snapshot.forEach(doc => {
+            const classData = doc.data();
+            const card = createClassCard(doc.id, classData);
+            classesList.appendChild(card);
+        });
+    } catch (error) {
+        console.error('Erro ao carregar turmas:', error);
+    }
+}
+
+function createClassCard(id, classData) {
+    const div = document.createElement('div');
+    div.className = 'class-card';
+    
+    div.innerHTML = `
+        <div class="class-header">
+            <h3>${classData.name}</h3>
+            <span class="plan-date">${classData.year}</span>
+        </div>
+        <div class="class-actions">
+            <button class="btn-secondary" onclick="editClass('${id}')">Editar</button>
+            <button class="btn-danger" onclick="deleteClass('${id}')">Deletar</button>
+        </div>
+    `;
+    
+    return div;
+}
+
+async function editClass(id) {
+    try {
+        const doc = await db.collection('classes').doc(id).get();
+        const classData = doc.data();
+        
+        currentEditingId = id;
+        document.getElementById('class-modal-title').textContent = 'Editar Turma';
+        
+        document.getElementById('c-name').value = classData.name;
+        document.getElementById('c-year').value = classData.year;
+        
+        classModal.classList.add('active');
+    } catch (error) {
+        console.error('Erro ao carregar turma:', error);
+    }
+}
+
+async function deleteClass(id) {
+    if (!confirm('Tem certeza que deseja deletar esta turma?')) return;
+    
+    try {
+        await db.collection('classes').doc(id).delete();
+        loadClasses();
+        loadDashboardStats();
+    } catch (error) {
+        console.error('Erro ao deletar turma:', error);
+        alert('Erro ao deletar turma!');
+    }
+}
+
+// Fechar modais ao clicar fora
+[questionModal, planModal, classModal].forEach(modal => {
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.classList.remove('active');
+        }
+    });
+});
